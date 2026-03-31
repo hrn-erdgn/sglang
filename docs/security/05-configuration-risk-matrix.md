@@ -7,7 +7,7 @@
 | Konfigürasyon | Ek TCP Port | Ek Pickle Noktası | Auth | Risk | Yaygınlık | Öncelik |
 |---|---|---|---|---|---|---|
 | **TP>1 (tek node)** | +1 XPUB 127.0.0.1 | `shm_broadcast.py:453,456` | YOK | DÜŞÜK | ÇOĞUNLUK | DÜŞÜK |
-| **TP>1 (multi-node)** | +1 XPUB public IP | `shm_broadcast.py:459` | YOK | KRİTİK | YAYGIN | **EN YÜKSEK** |
+| **TP>1 (multi-node)** | +1 XPUB public IP | `shm_broadcast.py:459` — XPUB/SUB tek yönlü, RCE DEĞİL, bilgi sızdırma | YOK | ORTA | YAYGIN | ORTA |
 | **PP>1 (tek node)** | +0 (torch.dist) | `common.py:1228,1293` (NCCL üzerinden) | YOK | DÜŞÜK | YAYGIN | DÜŞÜK |
 | **PP>1 (multi-node)** | +NCCL port | `common.py:1228,1293` (NCCL üzerinden) | YOK | ORTA | YAYGIN | ORTA |
 | **EP (MoE)** | +2 TCP/node (10000+) | `expert_backup_manager.py:65`, `client.py:76` | YOK | KRİTİK | NİŞ | YÜKSEK |
@@ -17,7 +17,7 @@
 | **PD Disagg (mooncake)** | +RDMA +HTTP 8998 | metadata pickle | YOK | YÜKSEK | YAYGIN | YÜKSEK |
 | **PD Disagg (nixl)** | +NIXL ports | struct only (pickle yok) | YOK | ORTA | NİŞ | ORTA |
 | **Encoder Parallel** | +N PULL TCP/istek | `encode_receiver.py:497,735` | YOK | KRİTİK | NİŞ | YÜKSEK |
-| **Multi-node (genel)** | IPC→TCP | Tüm recv_pyobj TCP'ye geçer | YOK | KRİTİK | YAYGIN | **EN YÜKSEK** |
+| **Multi-node (genel)** | IPC→TCP | PULL bind eden soketler (TokenizerMgr, DetokenizerMgr) RCE riski; PULL connect eden soketler (Scheduler) doğrudan erişilemez | YOK | KRİTİK | YAYGIN | **EN YÜKSEK** |
 | **Multimodal (srt VLM)** | +0 | Mevcut IPC | YOK | DÜŞÜK | YAYGIN | DÜŞÜK |
 | **Multimodal (multimodal_gen)** | +1 REP 127.0.0.1 | `scheduler_client.py:28` | YOK | ORTA | NİŞ | ORTA |
 | **Speculative Decoding** | +0 | +0 | N/A | YOK | YAYGIN | — |
@@ -55,15 +55,17 @@ python -m sglang.launch_server \
 
 | Aktif Açık | Dosya | Risk |
 |-----------|-------|------|
-| MessageQueue remote XPUB | `shm_broadcast.py:224-232,459` | KRİTİK |
-| DP Attention TCP kanalları | `server_args.py:6541-6591` | KRİTİK |
-| Expert Backup TCP soketleri | `expert_backup_manager.py:49-55` | KRİTİK |
+| MessageQueue remote XPUB | `shm_broadcast.py:224-232,459` | ORTA (bilgi sızdırma, RCE DEĞİL — XPUB/SUB tek yönlü) |
+| DP Attention — TokenizerMgr PULL bind | `tokenizer_manager.py:314` (bind=True) | **KRİTİK (RCE — PUSH ile yazılabilir)** |
+| DP Attention — DetokenizerMgr PULL bind | `detokenizer_manager.py:95` (bind=True) | **KRİTİK (RCE — PUSH ile yazılabilir)** |
+| Expert Backup PULL bind | `expert_backup_manager.py:49-51` (bind) | **KRİTİK (RCE — PUSH ile yazılabilir)** |
 | NCCL inter-node | `model_runner.py:920-922` | YÜKSEK |
-| Tüm manager recv_pyobj TCP | `scheduler.py:1413`, `tokenizer_manager.py:1524` | KRİTİK |
+| Scheduler PULL (connect, bind DEĞİL) | `scheduler.py:461` (bind=False) | DÜŞÜK (açık port yok, doğrudan yazılamaz) |
 
-**Toplam açık TCP pickle noktası: ~15+**
-**Öngörülebilir portlar: Evet (sabit offset'ler)**
-**Genel risk: EN YÜKSEK — Tam RCE zinciri mümkün**
+**Gerçek RCE noktaları: 3** (TokenizerMgr PULL, DetokenizerMgr PULL, Expert Backup PULL — hepsi BIND eder)
+**Bilgi sızdırma: 1** (MessageQueue XPUB — SUB ile okunabilir)
+**Öngörülebilir portlar: Evet** (sabit offset: port+234, port+235, 10000+rank*2)
+**Genel risk: EN YÜKSEK — RCE mümkün (bind eden PULL soketleri üzerinden)**
 
 ### #2: Multimodal API Servisi (VLM + PD Disagg)
 
@@ -130,9 +132,9 @@ Kullanıcının mevcut konfigürasyonuna tek parametre eklendiğinde:
 | Eklenen Parametre | Yeni Risk Seviyesi | Açılan Saldırı Yüzeyi |
 |---|---|---|
 | `--tp 2` | DÜŞÜK | MessageQueue local XPUB (127.0.0.1) |
-| `--tp 2 --nnodes 2` | **KRİTİK** | MessageQueue remote XPUB (public IP) + NCCL |
+| `--tp 2 --nnodes 2` | ORTA | MessageQueue remote XPUB (bilgi sızdırma, RCE DEĞİL) + NCCL |
 | `--enable-dp-attention` | DÜŞÜK | 5 TCP port (127.0.0.1, tek node) |
-| `--enable-dp-attention --nnodes 2` | **KRİTİK** | 5+ TCP port (public IP) + handshake |
+| `--enable-dp-attention --nnodes 2` | **KRİTİK** | TokenizerMgr/DetokenizerMgr PULL bind TCP → RCE |
 | `--ep-size 4` (MoE model ile) | **KRİTİK** | Expert backup TCP (public IP, sabit port) |
 | `--disaggregation-mode prefill` | **KRİTİK** | encode_receiver PULL + bootstrap HTTP |
 | `--encoder-transfer-backend zmq_to_scheduler` | **KRİTİK** | pickle.loads() TCP üzerinde |

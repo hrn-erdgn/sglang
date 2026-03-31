@@ -32,15 +32,15 @@ python -m sglang.launch_server \
 | **CVE-2026-3059** | Multimodal Gen ZMQ Broker | AKTİF DEĞİL (farklı runtime) | ORTA — localhost binding |
 | **CVE-2026-3060** | Encoder Disaggregation | AKTİF DEĞİL (disagg kapalı) | KRİTİK — TCP'de pickle.loads() |
 | **CVE-2026-3989** | replay_request_dump.py | AKTİF DEĞİL (utility script) | DÜŞÜK — SafeUnpickler ile korunuyor |
-| **ShadowMQ Orijinal** | MessageQueue (shm_broadcast) | AKTİF DEĞİL (tp=1) | KRİTİK — multi-node tp>1'de |
+| **ShadowMQ Orijinal** | MessageQueue (shm_broadcast) | AKTİF DEĞİL (tp=1) | ORTA — multi-node tp>1'de bilgi sızdırma (XPUB/SUB tek yönlü, doğrudan RCE DEĞİL) |
 
 ### 3. En Kritik 5 Bulgu
 
 1. **SafeUnpickler mevcut ama kullanılmıyor**: `common.py:2122-2196`'da SafeUnpickler var ama ~30 pickle.loads() noktasının sadece 1'inde kullanılıyor
 2. **Sıfır authentication**: Hiçbir ZMQ soketinde HMAC, CURVE, TLS veya token doğrulaması yok
-3. **Konfigürasyon değişikliği ile anında kritik hale gelir**: `--enable-dp-attention` veya `--tp 2` eklenmesi tüm IPC kanallarını TCP'ye taşır
-4. **Multi-node deployment'larda tam RCE**: TP>1 multi-node'da MessageQueue public IP'de bind eder, unauthenticated pickle ile RCE
-5. **PD Disaggregation'da açık kapı**: encode_receiver.py'de her istek için yeni TCP soket açılır, pickle.loads() ile deserialize edilir
+3. **Konfigürasyon değişikliği ile anında kritik hale gelir**: `--enable-dp-attention --nnodes 2+` eklenmesi TokenizerManager/DetokenizerManager PULL soketlerini TCP'ye taşır → RCE
+4. **TP>1 multi-node'da MessageQueue**: XPUB/SUB tek yönlü topoloji nedeniyle doğrudan RCE mümkün DEĞİL, ancak bilgi sızdırma (tensor metadata) mümkün
+5. **PD Disaggregation'da doğrudan RCE**: encode_receiver.py'de PULL bind TCP soketi, pickle.loads() ile deserialize — saldırgan PUSH ile bağlanıp yazabilir
 
 ### 4. Acil Aksiyon Öğeleri
 
@@ -54,12 +54,12 @@ python -m sglang.launch_server \
 ### 5. Konfigürasyon Bazlı Risk Haritası (Özet)
 
 ```
-Risk Yok          Düşük            Orta             Yüksek           KRİTİK
+Risk Yok          Düşük            Orta               Yüksek           KRİTİK
 ────────────────────────────────────────────────────────────────────────────
-LoRA              TP>1             PP>1             EP (MoE)         Multi-node TP>1
-Spec. Decoding    (tek node)       Multimodal Gen   Dumper           PD Disaggregation
-Chunked Prefill   Multimodal(srt)                                   DP Attention (multi)
-Torch Compile     gRPC                                              Multi-node genel
+LoRA              TP>1             PP>1               Dumper           PD Disaggregation
+Spec. Decoding    (tek node)       Multimodal Gen     EP (MoE)         DP Attention (multi)
+Chunked Prefill   Multimodal(srt)  Multi-node TP>1
+Torch Compile     gRPC             (bilgi sızdırma)
 ```
 
 ---
